@@ -1,0 +1,141 @@
+#!/bin/bash
+# Author:       Ralph Carlisle
+# Date:         2019-May-14
+# Description:  Checks the health of the chronyd service and the system clock offset
+
+
+function float_compare()
+{
+    local cond=0
+    if [[ $# -gt 0 ]]; then
+        cond=$(echo "$*" | bc -q 2>/dev/null)
+        if [[ -z "$cond" ]]; then
+          cond=0
+        fi
+        if [[ "$cond" != 0  &&  "$cond" != 1 ]]; then
+          cond=0
+        fi
+    fi
+    local stat=$((cond == 0))
+    return $stat
+}
+
+############
+#   VARS   #
+############
+NAGIOS_CRITICAL=2
+NAGIOS_OK=0
+NAGIOS_UNKNOWN=3
+NAGIOS_WARNING=1
+
+# regexes
+ALL_ZEROES='^0*.?0+$'
+FLOAT_OR_INT='^[0-1]*\.?[0-9]+'
+############
+
+read -r -d '' USAGE <<"EOF"
+Required Parameters:
+    -c <CRITICAL> [MANDATORY] If the offset of the selected clock exceeds this value generate a CRITICAL message, integer or float value in seconds (less than 2.0)
+    -w <WARNING>  [MANDATORY] If the offset of the selected clock exceeds this value generate a WARNING message, integer or float value in seconds (less than 2.0)
+EOF
+
+while getopts :c:w: param; do
+  case "${param}" in
+    c)  CRITICAL="${OPTARG}"
+        ;;
+    w)  WARNING="${OPTARG}"
+        ;;
+    *)  printf "Invalid option: -%s" "$OPTARG"
+        printf "%s\n" "$USAGE"
+        exit "$NAGIOS_UNKNOWN"
+        ;;
+  esac
+done
+
+# Ensure prerequisites are present
+HAS_BC=$(which bc > /dev/null;echo $?)
+HAS_CHRONYC=$(which chronyc > /dev/null;echo $?)
+HAS_GREP=$(which grep > /dev/null;echo $?)
+HAS_PGREP=$(which pgrep > /dev/null;echo $?)
+
+if [[ "$HAS_BC" -ne "0" ]]; then
+    printf "ERROR: bc is not found in the PATH envvar; you need to install it"
+    exit "$NAGIOS_CRITICAL"
+fi
+if [[ "$HAS_CHRONYC" -ne "0" ]]; then
+    printf "ERROR: chronyc is not found in the PATH envvar; you need to install it"
+    exit "$NAGIOS_CRITICAL"
+fi
+if [[ "$HAS_GREP" -ne "0" ]]; then
+    printf "ERROR: grep is not found in the PATH envvar; you need to install it"
+    exit "$NAGIOS_CRITICAL"
+fi
+if [[ "$HAS_PGREP" -ne "0" ]]; then
+    printf "ERROR: pgrep is not found in the PATH envvar; you need to install it"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ -z "${CRITICAL}" ]]; then
+    printf "ERROR:  -c (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_UNKNOWN"
+fi
+if [[ -z "${WARNING}" ]]; then
+    printf "ERROR:  -w (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_UNKNOWN"
+fi
+
+if [[ "$CRITICAL" =~ $ALL_ZEROES ]]; then
+    printf "CRITICAL:  -c value must not be all zeroes"
+    exit "$NAGIOS_CRITICAL"
+fi
+if [[ "$WARNING" =~ $ALL_ZEROES ]]; then
+    printf "CRITICAL:  -w value must not be all zeroes"
+    exit "$NAGIOS_CRITICAL"
+fi
+if float_compare "$CRITICAL >= 2.0"; then
+    printf "CRITICAL:  -c value must be a float or integer between 0.*1 and 1.9* in value"
+    exit "$NAGIOS_CRITICAL"
+fi
+if ! [[ "$CRITICAL" =~ $FLOAT_OR_INT ]]; then
+    printf "CRITICAL:  -c value must be a float or integer"
+    exit "$NAGIOS_CRITICAL"
+fi
+if float_compare "$WARNING >= 2.0"; then
+    printf "CRITICAL:  -w value must be a float or integer between 0.*1 and 1.9* in value"
+    exit "$NAGIOS_CRITICAL"
+fi
+if ! [[ "$WARNING" =~ $FLOAT_OR_INT ]]; then
+    printf "CRITICAL:  -w value must be a float or integer"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+# Alert if chronyd is not running
+CHRONYD_PID=$(/usr/bin/pgrep -o chronyd)
+if [[ -z ${CHRONYD_PID+x} ]]; then
+    printf "CRITICAL:  chronyd service is not running"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+CHRONYC_TRACKING=$(chronyc tracking)
+# This is the leap status, which can be Normal, Insert second, Delete second or Not synchronised
+# Alert if the leap status is "Not synchronised"
+LEAP_STATUS=$(echo "$CHRONYC_TRACKING" | grep "Leap status" | awk '{print $4}')
+if [[ "$LEAP_STATUS" == "Not synchronised" ]]; then
+    printf  "CRITICAL:  chrony is not synchronised with a clock source"
+    exit "$NAGIOS_CRITICAL"
+else
+  # Alert if OFFSET_VALUE is beyond CRITICAL or WARNING thresholds
+  SYSTEM_TIME=$(echo "$CHRONYC_TRACKING" | grep 'System time')
+  OFFSET_VALUE=$(echo "$SYSTEM_TIME" | awk '{print $4}')
+  CLOCK_SPEED=$(echo "$SYSTEM_TIME" | awk '{print $6}')
+  if float_compare "$OFFSET_VALUE >= $CRITICAL"; then
+      printf "CRITICAL: offset is %s by [%s] seconds compared to clock server time" "$CLOCK_SPEED" "$OFFSET_VALUE"
+      exit "$NAGIOS_CRITICAL"
+  elif float_compare "$OFFSET_VALUE >= $WARNING"; then
+      printf "WARNING: offset is %s by [%s] seconds compared to clock server time" "$CLOCK_SPEED" "$OFFSET_VALUE"
+      exit "$NAGIOS_WARNING"
+  else
+    printf "OK: offset is within expected bounds"
+    exit "$NAGIOS_OK"
+  fi
+fi

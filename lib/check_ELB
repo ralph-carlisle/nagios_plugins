@@ -1,0 +1,134 @@
+#!/bin/bash
+# Author:       Ralph Carlisle
+# Date:         2018-Feb-21
+# Description:  Checks that the number of instances reported by the ELB also matches the number that are healthy;
+#               if there is a discrepancy then an alert is pushed.
+
+
+
+############
+#   VARS   #
+############
+ARNGROUP=''
+AWSBIN=$(which aws)
+AWS_ACCESS_KEY_ID=''
+AWS_SECRET_ACCESS_KEY=''
+ID=''
+KEY=''
+REGION=''
+CRIT=''
+WARN=''
+re='^[0-9]+$'
+
+NAGIOS_CRITICAL=2
+NAGIOS_OK=0
+NAGIOS_UNKNOWN=3
+NAGIOS_WARNING=1
+
+
+if [ -z "${AWSBIN}" ]; then
+    printf "Error:  awscli binary not found\n      This file should be set on the system by puppet."
+    exit "$NAGIOS_CRITICAL"
+fi
+
+read -r -d '' USAGE <<"EOF"
+Required Parameters:
+    -a <ARN of ELB Target Group>   the ARN identifier of the ELB Target Group
+    -c <number of unhealthy>       the number of unhealthy instances to CRITICAL on
+    -i <AWS_ACCESS_KEY_ID>         the AWS_ACCESS_KEY_ID
+    -k <AWS_SECRET_ACCESS_KEY>     the AWS_SECRET_ACCESS_KEY
+    -r <AWS Region>                the AWS region to interact, like us-east-1
+    -w <number of unhealthy>       the number of unhealthy instances to WARN on
+EOF
+
+while getopts :a:c:i:k:r:w: param; do
+  case "${param}" in
+    a)  ARNGROUP="${OPTARG}"
+        ;;
+    c)  CRIT_INSTANCES="${OPTARG}"
+        ;;
+    i)  ID="${OPTARG}"
+        ;;
+    k)  KEY="${OPTARG}"
+        ;;
+    r)  REGION="${OPTARG}"
+        ;;
+    w)  WARN_INSTANCES="${OPTARG}"
+        ;;
+    *)  printf "Invalid option: -%s" "$OPTARG"
+        exit "$NAGIOS_CRITICAL"
+        ;;
+  esac
+done
+
+if [[ -z "${ARNGROUP}" ]]; then
+    printf "ERROR:  -a (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ -z "${CRIT}" ]]; then
+    printf "ERROR:  -c (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ -z "${ID}" ]]; then
+    printf "ERROR:  -i (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ -z "${KEY}" ]]; then
+    printf "ERROR:  -k (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ -z "${REGION}" ]]; then
+    printf "ERROR:  -r (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ -z "${WARN}" ]]; then
+    printf "ERROR:  -w (no value supplied)\n%s" "$USAGE"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ ! "$CRIT_INSTANCES" =~ $re || "$CRIT_INSTANCES" -eq 0 ]]; then
+   printf "ERROR: -c (%s) is not a non-zero integer" "$CRITICAL_INSTANCES"
+   exit "$NAGIOS_CRITICAL"
+fi
+
+if [[ ! "$WARN_INSTANCES" =~ $re || "$WARN_INSTANCES" -eq 0 ]]; then
+   printf "ERROR: -w (%s) is not a non-zero integer" "$WARN_INSTANCES"
+   exit "$NAGIOS_CRITICAL"
+fi
+
+### Supportive URL : http://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSGettingStartedGuide/AWSCredentials.html ###
+export AWS_ACCESS_KEY_ID="$ID"
+export AWS_SECRET_ACCESS_KEY="$KEY"
+
+#check to see if the supplied ARNGROUP is accessible or not
+$AWSBIN elbv2 describe-target-health --target-group-arn "$ARNGROUP" --region "$REGION" &> /dev/null
+AWSBIN_RESULT=$?
+
+if [[ "$AWSBIN_RESULT" -ne 0 ]]; then
+    printf "CRITICAL:  ARNGROUP (%s) cannot be reached" "$ARNGROUP"
+    exit "$NAGIOS_CRITICAL"
+fi
+
+# get the total number of healthy instances and the total number of instances in the ELB target group
+NUMHEALTHY=$($AWSBIN elbv2 describe-target-health --target-group-arn "$ARNGROUP" --region "$REGION" | grep -c -E \"State\":\ \"healthy\")
+NUMINSTANCES=$($AWSBIN elbv2 describe-target-health --target-group-arn "$ARNGROUP" --region "$REGION" | grep -c Id)
+
+if [[ $(("$NUMINSTANCES" - "$NUMHEALTHY")) -ge "$CRIT_INSTANCES" ]]; then
+    printf "CRITICAL: [%s] out of [%s] healthy, greather than or equal to threshold of [%s] unhealthy" "$NUMHEALTHY" "$NUMINSTANCES" "$CRIT_INSTANCES"
+    exit "$NAGIOS_CRITICAL"
+elif [[ $(("$NUMINSTANCES" - "$NUMHEALTHY")) -ge "$WARN_INSTANCES" ]]; then
+    printf "WARN: [%s] out of [%s] healthy, greather than or equal to threshold of [%s] unhealthy" "$NUMHEALTHY" "$NUMINSTANCES" "$WARN_INSTANCES"
+    exit "$NAGIOS_WARNING"
+elif [[ $(("$NUMINSTANCES" - "$NUMHEALTHY")) -le "$CRIT_INSTANCES" ]] && [[ $(("$ID" - "$NUMHEALTHY")) -le "$WARN_INSTANCES" ]]; then
+    printf "OK: [%s] out of [%s] healthy" "$NUMHEALTHY" "$NUMINSTANCES"
+    exit "$NAGIOS_OK"
+else
+    printf "UNKNOWN: Unable to compare health vs total from values: healthy=[%s] and total=[%s]" "$NUMHEALTHY" "$NUMINSTANCES"
+    exit "$NAGIOS_UNKNOWN"
+fi
+
