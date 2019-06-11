@@ -76,11 +76,13 @@ if [[ "$HAS_PGREP" -ne "0" ]]; then
 fi
 
 if [[ -z "${CRITICAL}" ]]; then
-    printf "ERROR:  -c (no value supplied)\n%s" "$USAGE"
+    echo "ERROR:  -c (no value supplied)"
+    echo "$USAGE"
     exit "$NAGIOS_UNKNOWN"
 fi
 if [[ -z "${WARNING}" ]]; then
-    printf "ERROR:  -w (no value supplied)\n%s" "$USAGE"
+    echo "ERROR:  -w (no value supplied)"
+    echo "$USAGE"
     exit "$NAGIOS_UNKNOWN"
 fi
 
@@ -111,7 +113,7 @@ fi
 
 # Alert if chronyd is not running
 CHRONYD_PID=$(/usr/bin/pgrep -o chronyd)
-if [[ -z ${CHRONYD_PID+x} ]]; then
+if [[ -z "${CHRONYD_PID}" ]]; then
     printf "CRITICAL:  chronyd service is not running"
     exit "$NAGIOS_CRITICAL"
 fi
